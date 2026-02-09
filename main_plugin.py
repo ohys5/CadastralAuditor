@@ -41,6 +41,36 @@ def get_angle_diff(geom1, geom2):
         
     return diff
 
+def get_advanced_similarity(geom_curr, cad_geom):
+    # 1. 평균 거리 계산 (정점들을 샘플링하여 거리 평균 산출)
+    dist_sum = 0
+    length = geom_curr.length()
+    if length == 0: return float('inf'), 0.0
+    
+    points = [geom_curr.interpolate(length * i/4) for i in range(5)]
+    for p in points:
+        dist_sum += p.distance(cad_geom)
+    avg_dist = dist_sum / 5
+    
+    # 2. 선분 길이 유사도 (너무 길거나 짧은 선 제외)
+    l_curr = geom_curr.length()
+    l_cad = cad_geom.length()
+    len_ratio = min(l_curr, l_cad) / max(l_curr, l_cad) if max(l_curr, l_cad) > 0 else 0.0
+    
+    return avg_dist, len_ratio
+
+def check_projection_overlap(geom_curr, cad_geom, width=2.0):
+    """
+    현황선이 지적선 버퍼 내에 얼마나 포함되는지 비율 계산 (0.0 ~ 1.0)
+    Proximity Trap(거리는 가깝지만 서로 엇갈린 경우) 방지용
+    """
+    if cad_geom.isEmpty() or geom_curr.isEmpty():
+        return 0.0
+        
+    buff = cad_geom.buffer(width, 4)
+    intersection = geom_curr.intersection(buff)
+    return intersection.length() / geom_curr.length() if geom_curr.length() > 0 else 0.0
+
 class NumericTableWidgetItem(QTableWidgetItem):
     def __lt__(self, other):
         try:
@@ -223,36 +253,42 @@ class CadastralAuditor:
             
             # [Task 2] 최적 후보 선정 (Best Fit Selection)
             best_match_feat = None
+            min_score = float('inf')
             min_dist = float('inf')
+            best_angle_diff = 0.0
             
             # 후보군(candidate_ids)에 대해 필터링 수행
             for fid in candidate_ids:
                 cad_feat = cad_layer.getFeature(fid)
                 cad_geom = cad_feat.geometry()
                 
-                # 거리 계산 (이전 방식 참조: Hausdorff Distance 사용)
-                # 1. Min Distance for exclusion filter (Fast check)
-                d_min = geom_curr.distance(cad_geom)
-                
-                # 필터 A: 거리 제한 (Step 1) - 최단 거리 기준
-                if d_min > exclusion_limit:
-                    continue
-                
-                # 필터 B: 각도 제한 (Step 2) - 45도 이상이면 탈락
+                # 1차 필터: 각도 (이미 구현됨)
                 angle_diff = get_angle_diff(geom_curr, cad_geom)
                 if angle_diff > 45:
                     continue
                 
-                # 3. Average Distance (MAE) for ranking
-                # Use PointToLineAuditor to calculate average distance of analysis points
-                p2l = PointToLineAuditor(cad_feat, cur_feat_tr, densify_distance=1.0)
-                p2l_res = p2l.process()
-                dist = p2l_res["mae"]
+                # 2. [신규] 투영 중첩 필터 (Proximity Trap 방지)
+                # 현황선이 지적선과 '나란히' 달리는 구간이 전체의 50% 미만이면 탈락
+                overlap_ratio = check_projection_overlap(geom_curr, cad_geom, exclusion_limit)
+                if overlap_ratio < 0.5:
+                    continue
                 
-                # 최솟값 갱신 (Step 3)
-                if dist < min_dist:
-                    min_dist = dist
+                # 3. 고급 유사도 계산 (평균 거리, 길이 비)
+                avg_d, l_ratio = get_advanced_similarity(geom_curr, cad_geom)
+                
+                # 거리 제한 (길이 비율 필터는 작은 파편 매칭을 위해 제거)
+                if avg_d > exclusion_limit:
+                    continue
+                    
+                # 4. 점수 산정 (비용 함수)
+                # 거리가 가까울수록(avg_d 작음), 길이가 비슷할수록(l_ratio 큼), 중첩이 확실할수록(overlap 큼) 좋음
+                matching_score = (avg_d * 0.6) + ((1 - overlap_ratio) * 0.3) + ((1 - l_ratio) * 0.1)
+                
+                if matching_score < min_score:
+                    min_score = matching_score
+                    min_dist = avg_d
                     best_match_feat = cad_feat
+                    best_angle_diff = angle_diff
             
             # [Task 3] 매칭 결과 처리
             if best_match_feat:
@@ -274,8 +310,18 @@ class CadastralAuditor:
                 
                 print(f"DEBUG:   -> 위상: {topology}, 점수: {score:.3f}, 판정: {status}")
                 
-                # Update Statistics
-                if min_dist <= tol_min:
+                # Determine precise distance for display (Consistency with Status)
+                display_dist = min_dist
+                if selected_mode == 'distance':
+                    display_dist = score
+                elif 'position_error' in result:
+                    display_dist = result['position_error']
+                
+                # Update Statistics (Use 'status' to match Table display)
+                # [Fix] "불부합" contains "부합", so check "불부합" first or use startswith
+                if "불부합" in status:
+                    stats["critical"] += 1
+                elif "부합" in status:  # Now safe to check "부합"
                     stats["pass"] += 1
                 elif "위치정정" in status:
                     stats["shift"] += 1
@@ -290,7 +336,7 @@ class CadastralAuditor:
 
                 # [시각화] 비교 점 및 오차 벡터 생성 (PointToLineAuditor 활용)
                 # 사용자가 지적선과 현형선의 비교 대상 점을 시각적으로 확인할 수 있도록 함
-                p2l = PointToLineAuditor(best_match_feat, cur_feat_tr)
+                p2l = PointToLineAuditor(best_match_feat, cur_feat_tr, densify_distance=1.0)
                 p2l_res = p2l.process()
                 error_geom = p2l_res["error_vectors"]
                 if error_geom and not error_geom.isEmpty():
@@ -310,15 +356,16 @@ class CadastralAuditor:
                         break
                 
                 self.dlg.table_results.setItem(row, 1, QTableWidgetItem(match_label))
-                self.dlg.table_results.setItem(row, 2, NumericTableWidgetItem(f"{min_dist:.3f}"))
-                self.dlg.table_results.setItem(row, 3, QTableWidgetItem(topology))
-                self.dlg.table_results.setItem(row, 4, NumericTableWidgetItem(f"{score:.3f}"))
-                self.dlg.table_results.setItem(row, 5, QTableWidgetItem(status))
-                self.dlg.table_results.setItem(row, 6, NumericTableWidgetItem(f"{nd_cost:.3f}"))
-                self.dlg.table_results.setItem(row, 7, NumericTableWidgetItem(f"{shift_x:.3f}"))
-                self.dlg.table_results.setItem(row, 8, NumericTableWidgetItem(f"{shift_y:.3f}"))
+                self.dlg.table_results.setItem(row, 2, NumericTableWidgetItem(f"{display_dist:.3f}"))
+                self.dlg.table_results.setItem(row, 3, NumericTableWidgetItem(f"{best_angle_diff:.1f}"))
+                self.dlg.table_results.setItem(row, 4, QTableWidgetItem(topology))
+                self.dlg.table_results.setItem(row, 5, NumericTableWidgetItem(f"{score:.3f}"))
+                self.dlg.table_results.setItem(row, 6, QTableWidgetItem(status))
+                self.dlg.table_results.setItem(row, 7, NumericTableWidgetItem(f"{nd_cost:.3f}"))
+                self.dlg.table_results.setItem(row, 8, NumericTableWidgetItem(f"{shift_x:.3f}"))
+                self.dlg.table_results.setItem(row, 9, NumericTableWidgetItem(f"{shift_y:.3f}"))
                 
-                item_status = self.dlg.table_results.item(row, 5)
+                item_status = self.dlg.table_results.item(row, 6)
                 if "불부합" in status:
                     item_status.setForeground(QColor("red"))
                 elif "부합" in status:
@@ -396,8 +443,8 @@ class CadastralAuditor:
         
         # Get shift values from table directly (Delta), not from spinboxes (Accumulated)
         try:
-            dx = float(self.dlg.table_results.item(row, 7).text())
-            dy = float(self.dlg.table_results.item(row, 8).text())
+            dx = float(self.dlg.table_results.item(row, 8).text())
+            dy = float(self.dlg.table_results.item(row, 9).text())
         except (ValueError, AttributeError):
             return
             

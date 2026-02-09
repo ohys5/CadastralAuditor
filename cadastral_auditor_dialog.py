@@ -141,9 +141,9 @@ class CadastralAuditorDialog(QtWidgets.QDialog):
         
         # --- Results Table ---
         self.table_results = QtWidgets.QTableWidget()
-        self.table_results.setColumnCount(10)
+        self.table_results.setColumnCount(11)
         self.table_results.setHorizontalHeaderLabels([
-            "연번", "매칭ID", "상대 거리(m)", "위상", "점수", "판정", "ND Cost", "dx(m)", "dy(m)", "비고"
+            "연번", "매칭ID", "상대 거리(m)", "각도(deg)", "위상", "점수", "판정", "ND Cost", "dx(m)", "dy(m)", "비고"
         ])
         self.table_results.setSortingEnabled(True)
         layout.addWidget(self.table_results)

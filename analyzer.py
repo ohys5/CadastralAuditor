@@ -498,10 +498,20 @@ class PointToLineAuditor:
                     cad_segments_data.append((geom, angle))
 
         # 2. Process Current Geometry
-        if self.current_geom.isMultipart():
-            cur_parts = self.current_geom.asMultiPolyline()
-        else:
-            cur_parts = [self.current_geom.asPolyline()]
+        cur_parts = []
+        if self.current_geom.type() == QgsWkbTypes.PolygonGeometry:
+            if self.current_geom.isMultipart():
+                for poly in self.current_geom.asMultiPolygon():
+                    for ring in poly:
+                        cur_parts.append(ring)
+            else:
+                for ring in self.current_geom.asPolygon():
+                    cur_parts.append(ring)
+        elif self.current_geom.type() == QgsWkbTypes.LineGeometry:
+            if self.current_geom.isMultipart():
+                cur_parts = self.current_geom.asMultiPolyline()
+            else:
+                cur_parts = [self.current_geom.asPolyline()]
 
         max_dev = 0.0
         sum_sq = 0.0
