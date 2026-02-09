@@ -1,0 +1,10 @@
+[general]
+name=CadastralAuditor
+description=Analyzes discrepancies between cadastral lines and current survey lines using geometric algorithms.
+about=This plugin calculates Hausdorff distances and centroid shifts to detect inconsistencies between official cadastral records and field survey data.
+version=1.0
+qgisMinimumVersion=3.0
+author=Gemini Code Assist
+email=gemini@example.com
+repository=
+category=Analysis
