@@ -5,7 +5,8 @@ class CadastralAuditorDialog(QtWidgets.QDialog):
     def __init__(self, parent=None):
         super(CadastralAuditorDialog, self).__init__(parent)
         self.setWindowTitle("Cadastral Auditor")
-        self.resize(800, 500)
+        self.setWindowFlags(self.windowFlags() | QtCore.Qt.WindowStaysOnTopHint)
+        self.resize(560, 350)
         
         layout = QtWidgets.QVBoxLayout(self)
         
@@ -41,7 +42,7 @@ class CadastralAuditorDialog(QtWidgets.QDialog):
         self.sb_tol_max.setSingleStep(0.01)
         input_layout.addWidget(self.sb_tol_max, 4, 1)
         
-        input_layout.addWidget(QtWidgets.QLabel("제외 범위 (Exclusion, m):"), 5, 0)
+        input_layout.addWidget(QtWidgets.QLabel("상대거리 제외범위 (Exclusion, m):"), 5, 0)
         self.sb_exclusion_limit = QtWidgets.QDoubleSpinBox()
         self.sb_exclusion_limit.setDecimals(3)
         self.sb_exclusion_limit.setRange(0.001, 100.0)
@@ -111,6 +112,75 @@ class CadastralAuditorDialog(QtWidgets.QDialog):
             
         nudge_group.setLayout(nudge_layout)
         layout.addWidget(nudge_group)
+
+        # --- [추가] 자동 위치 보정 (Auto-Correction) ---
+        auto_group = QtWidgets.QGroupBox("자동 위치 보정 (Auto-Correction)")
+        auto_layout = QtWidgets.QGridLayout()
+        
+        auto_layout.addWidget(QtWidgets.QLabel("탐색 반경(m):"), 0, 0)
+        self.sb_search_range = QtWidgets.QDoubleSpinBox()
+        self.sb_search_range.setValue(2.0)
+        self.sb_search_range.setSingleStep(0.5)
+        auto_layout.addWidget(self.sb_search_range, 0, 1)
+        
+        auto_layout.addWidget(QtWidgets.QLabel("간격(m):"), 0, 2)
+        self.sb_search_step = QtWidgets.QDoubleSpinBox()
+        self.sb_search_step.setValue(0.1)
+        self.sb_search_step.setSingleStep(0.1)
+        auto_layout.addWidget(self.sb_search_step, 0, 3)
+
+        auto_layout.addWidget(QtWidgets.QLabel("그룹 거리(m):"), 0, 4)
+        self.sb_cluster_dist = QtWidgets.QDoubleSpinBox()
+        self.sb_cluster_dist.setRange(0.0, 500.0)
+        self.sb_cluster_dist.setValue(15.0)
+        self.sb_cluster_dist.setSingleStep(1.0)
+        self.sb_cluster_dist.setToolTip("선택된 객체들이 이 거리 이상 떨어져 있으면 다른 그룹으로 분리합니다.")
+        auto_layout.addWidget(self.sb_cluster_dist, 0, 5)
+
+        self.chk_iterative = QtWidgets.QCheckBox("반복 최적화 (수렴할 때까지 실행)")
+        auto_layout.addWidget(self.chk_iterative, 1, 0, 1, 6)
+        
+        btn_select_layout = QtWidgets.QHBoxLayout()
+        self.btn_select_area = QtWidgets.QPushButton("영역 선택 (다각형)")
+        self.btn_select_multi = QtWidgets.QPushButton("다중 영역 선택 (추가)")
+        btn_select_layout.addWidget(self.btn_select_area)
+        btn_select_layout.addWidget(self.btn_select_multi)
+        auto_layout.addLayout(btn_select_layout, 2, 0, 1, 4)
+        
+        self.btn_auto_calc = QtWidgets.QPushButton("최적 이동량 계산")
+        auto_layout.addWidget(self.btn_auto_calc, 2, 4, 1, 2)
+        
+        auto_group.setLayout(auto_layout)
+        layout.addWidget(auto_group)
+
+        # --- [추가] 가중치 지점 (Control Points) ---
+        self.cp_group = QtWidgets.QGroupBox("가중치 지점 (Control Points)")
+        cp_layout = QtWidgets.QVBoxLayout()
+        
+        self.tbl_control_points = QtWidgets.QTableWidget()
+        self.tbl_control_points.setColumnCount(5)
+        self.tbl_control_points.setHorizontalHeaderLabels(["Cur X", "Cur Y", "Tar X", "Tar Y", "Weight"])
+        self.tbl_control_points.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.tbl_control_points.setFixedHeight(70)
+        cp_layout.addWidget(self.tbl_control_points)
+        
+        cp_btn_layout = QtWidgets.QHBoxLayout()
+        
+        cp_btn_layout.addWidget(QtWidgets.QLabel("가중치:"))
+        self.sb_cp_weight = QtWidgets.QDoubleSpinBox()
+        self.sb_cp_weight.setRange(0.1, 1000.0)
+        self.sb_cp_weight.setValue(50.0)
+        self.sb_cp_weight.setSingleStep(10.0)
+        cp_btn_layout.addWidget(self.sb_cp_weight)
+        
+        self.btn_add_cp = QtWidgets.QPushButton("지점 추가 (지도 선택)")
+        self.btn_clear_cp = QtWidgets.QPushButton("목록 초기화")
+        cp_btn_layout.addWidget(self.btn_add_cp)
+        cp_btn_layout.addWidget(self.btn_clear_cp)
+        cp_layout.addLayout(cp_btn_layout)
+        
+        self.cp_group.setLayout(cp_layout)
+        layout.addWidget(self.cp_group)
 
         # --- [추가] 분석 알고리즘 선택 ---
         self.gb_mode = QtWidgets.QGroupBox("판정 알고리즘 선택")

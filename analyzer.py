@@ -286,6 +286,13 @@ class ConfidenceStringMatcher:
         self.sigma = sigma
         self.band_width = sigma * 1.96 # 95% 신뢰구간 폭
 
+    def clip_to_overlap(self, g1, g2, buff_width):
+        b2 = g2.buffer(buff_width, 5)
+        c1 = g1.intersection(b2)
+        b1 = g1.buffer(buff_width, 5)
+        c2 = g2.intersection(b1)
+        return c1, c2
+
     def process_pair(self, survey_feat, cadastral_feat, th_shape=0.25, th_pos=0.15, mode='distance'):
         """
         현형선과 지적선의 기하학적 유사성을 신뢰 영역(Confidence Region) 기반으로 분석합니다.
@@ -343,101 +350,85 @@ class ConfidenceStringMatcher:
         # MODE B: 기존 면적/점수 기반 (Original / ND Cost)
         # ---------------------------------------------------------
         else:
-            # Step 1: 위상 감지 (Topology Check)
-            is_closed = False
-            survey_boundary = None
-            
-            # 멀티파트 처리 (가장 긴 파트 사용)
-            if survey_geom.isMultipart():
-                if survey_geom.type() == QgsWkbTypes.LineGeometry:
-                    parts = survey_geom.asMultiPolyline()
-                    if parts:
-                        survey_geom = QgsGeometry.fromPolylineXY(max(parts, key=len))
-                elif survey_geom.type() == QgsWkbTypes.PolygonGeometry:
-                    parts = survey_geom.asMultiPolygon()
-                    if parts:
-                        best_part = max(parts, key=lambda p: QgsGeometry.fromPolygonXY(p).area())
-                        survey_geom = QgsGeometry.fromPolygonXY(best_part)
-            
-            # 폐합 여부 확인
+            # Ensure LineString for Band Analysis (Convert Polygon to Boundary)
             if survey_geom.type() == QgsWkbTypes.PolygonGeometry:
-                is_closed = True
-                survey_boundary = QgsGeometry(survey_geom)
-                survey_boundary.convertToType(QgsWkbTypes.LineGeometry, True)
-            else:
-                # LineString인 경우 시작점-끝점 거리 확인 (5cm 이내면 폐합 간주)
-                v = [v for v in survey_geom.vertices()]
-                if v and v[0].distance(v[-1]) < 0.05:
-                    is_closed = True
-                    if v[0].distance(v[-1]) == 0:
-                        survey_boundary = survey_geom
-                    else:
-                        pts = [QgsPointXY(p.x(), p.y()) for p in v]
-                        pts.append(pts[0]) # 강제 폐합
-                        survey_boundary = QgsGeometry.fromPolylineXY(pts)
-                else:
-                    is_closed = False
-                    survey_boundary = survey_geom
+                survey_geom = QgsGeometry(survey_geom) # Clone to avoid modifying original
+                survey_geom.convertToType(QgsWkbTypes.LineGeometry)
+            if cadastral_geom.type() == QgsWkbTypes.PolygonGeometry:
+                cadastral_geom = QgsGeometry(cadastral_geom)
+                cadastral_geom.convertToType(QgsWkbTypes.LineGeometry)
 
-            # Step 2: 신뢰 띠(Confidence Band) 생성
-            segments = 8
-            join_style = Qgis.JoinStyle.Round
-            miter_limit = 2.0
-            
-            if is_closed:
-                # Closed: Polygon Mode (FlatCap)
-                cap_style = Qgis.EndCapStyle.Flat
-                band_survey = survey_boundary.buffer(self.band_width, segments, cap_style, join_style, miter_limit)
-                band_cadastral = cadastral_geom.buffer(self.band_width, segments, cap_style, join_style, miter_limit)
-                topology_type = "Closed (Polygon)"
-                denominator = cadastral_geom.length() # 전체 둘레 기준
-            else:
-                # Open: LineString Mode (RoundCap for ends)
-                cap_style = Qgis.EndCapStyle.Round
-                band_survey = survey_boundary.buffer(self.band_width, segments, cap_style, join_style, miter_limit)
-                band_cadastral = cadastral_geom.buffer(self.band_width, segments, cap_style, join_style, miter_limit)
-                topology_type = "Open (LineString)"
-                denominator = survey_geom.length() # 현형선 길이 기준
+            # 1. [보완] 교차 검사 (Topology Check)
+            is_crossed = False
+            # Check for crossing (X-shape) which implies topological mismatch
+            if survey_geom.crosses(cadastral_geom): 
+                is_crossed = True
 
-            # Step 3: ND 비용 계산 (Normalized Difference Cost)
-            # ND = (Area(Union) - Area(Intersection)) / (Len_A + Len_B)
-            area_union = band_survey.combine(band_cadastral).area()
-            area_int = band_survey.intersection(band_cadastral).area()
-            len_sum = survey_boundary.length() + cadastral_geom.length()
+            # 2. [보완] 범위 일치화 (Projection Clipping)
+            # 서로 겹치는 구간만 잘라내어 순수 형상 비교 준비
+            clip_width = max(th_pos * 2.0, 1.0)
+            seg_surv, seg_cad = self.clip_to_overlap(survey_geom, cadastral_geom, clip_width)
             
+            if seg_surv.isEmpty() or seg_cad.isEmpty():
+                return {
+                    "topology": "No Overlap",
+                    "score": 0.0,
+                    "status": "불부합 (No Overlap)",
+                    "nd_cost": 999.0,
+                    "position_error": 999.0,
+                    "shift_x": dx,
+                    "shift_y": dy
+                }
+
+            # 3. 버퍼 생성 및 면적 계산 (신뢰 띠)
+            buff_s = seg_surv.buffer(self.band_width, 8, Qgis.EndCapStyle.Round, Qgis.JoinStyle.Round, 2.0)
+            buff_c = seg_cad.buffer(self.band_width, 8, Qgis.EndCapStyle.Round, Qgis.JoinStyle.Round, 2.0)
+            
+            area_union = buff_s.combine(buff_c).area()
+            area_int = buff_s.intersection(buff_c).area()
+            
+            len_sum = seg_surv.length() + seg_cad.length()
             nd_cost = (area_union - area_int) / len_sum if len_sum > 0 else 1.0
 
-            # Step 4: 2축 매트릭스 평가 (형상 vs 위치)
-            # 1. Position Metric: 교집합 면적 기반 추정 평균 거리 (Position Error)
-            # 이론적 최대 중첩 폭 = 2 * band_width
-            # 실제 중첩 폭 = area_int / denominator
-            overlap_width = 0.0
-            if denominator > 0:
-                overlap_width = area_int / denominator
+            # 4. 위치 오차 계산 (Position Error)
+            # 실제 중첩 폭 = area_int / average_length
+            avg_len = len_sum / 2.0
+            overlap_width = area_int / avg_len if avg_len > 0 else 0.0
             
             max_width = self.band_width * 2
             position_error = max_width - overlap_width
             if position_error < 0: position_error = 0.0
             
-            # F-measure Score (참고용 유지)
+            # 5. [보완] 회전(Rotation) 여부 판단
+            # 클리핑된 현형선의 양 끝점에서 지적선까지의 거리 차이 비교
+            verts = [v for v in seg_surv.vertices()]
+            is_rotated = False
+            if verts:
+                p_start = QgsGeometry.fromPointXY(QgsPointXY(verts[0].x(), verts[0].y()))
+                p_end = QgsGeometry.fromPointXY(QgsPointXY(verts[-1].x(), verts[-1].y()))
+                dist_start = p_start.distance(seg_cad)
+                dist_end = p_end.distance(seg_cad)
+                is_rotated = abs(dist_start - dist_end) > th_pos
+
+            # 6. 종합 판정 (Matrix Decision)
             score = overlap_width / max_width if max_width > 0 else 0.0
             if score > 1.0: score = 1.0
 
-            # 2. Matrix Decision Logic
-            is_shape_good = nd_cost <= th_shape
-            is_pos_good = position_error <= th_pos
-            
-            if is_shape_good and is_pos_good:
-                status = "부합 (Pass)"
-            elif is_shape_good and not is_pos_good:
-                status = "위치정정 필요 (Shift Required)"
-            elif not is_shape_good and is_pos_good:
-                status = "형상 불일치 (Shape Mismatch)"
+            if is_crossed:
+                status = "불부합 (Crossed)"
+            elif nd_cost <= th_shape:
+                if position_error <= th_pos:
+                    status = "부합 (Pass)"
+                else:
+                    if is_rotated:
+                        status = "회전 보정 필요"
+                    else:
+                        status = "위치정정 필요"
             else:
-                status = "불부합 (Critical)"
+                status = "형상 불일치"
             
             return {
-                "topology": topology_type,
+                "topology": "Band Analysis",
                 "score": score,
                 "status": status,
                 "nd_cost": nd_cost,
